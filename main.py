@@ -2,7 +2,8 @@ import sys, os, datetime, time, logging
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout,
-    QLabel, QStackedWidget, QDesktopWidget, QFileDialog, QMessageBox, QHBoxLayout, QSpacerItem, QSizePolicy, QGroupBox, QGridLayout, QCheckBox, QComboBox, QLineEdit
+    QLabel, QStackedWidget, QHBoxLayout, QDialog, QGridLayout,
+    QLineEdit, QCheckBox, QGroupBox, QComboBox
 )
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -243,7 +244,7 @@ class PreparationPage(QWidget):
 
 
 class MainPage(QWidget):
-    def __init__(self, switch_page_callback, back_callback):
+    def __init__(self, switch_page_callback, open_test_setting_callback, back_callback):
         super().__init__()
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -261,7 +262,10 @@ class MainPage(QWidget):
         for name in names:
             btn = QPushButton(name)
             btn.setFixedSize(150, 40)
-            btn.clicked.connect(lambda _, n=name: switch_page_callback(n))
+            if name == "오프라인 수집":
+                btn.clicked.connect(open_test_setting_callback)
+            else:
+                btn.clicked.connect(lambda _, n=name: switch_page_callback(n))
             layout.addWidget(btn, alignment=Qt.AlignCenter)
             self.buttons.append(btn)
 
@@ -334,6 +338,122 @@ class SimplePage(QWidget):
 
         self.setLayout(layout)
 
+class TestSettingDialog(QDialog):
+    start_test_signal = pyqtSignal(dict)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Test Settings")
+        self.setFixedSize(400, 300)
+
+        layout = QVBoxLayout()
+
+        grid = QGridLayout()
+
+        self.grasp_time = QLineEdit()
+        self.holding_time = QLineEdit()
+        self.release_time = QLineEdit()
+        self.rest_time = QLineEdit()
+        self.trials = QLineEdit()
+        self.prosthetic_control = QCheckBox("Prosthetic Control")
+
+        grid.addWidget(QLabel("Grasp Time (s):"), 0, 0)
+        grid.addWidget(self.grasp_time, 0, 1)
+        grid.addWidget(QLabel("Holding Time (s):"), 1, 0)
+        grid.addWidget(self.holding_time, 1, 1)
+        grid.addWidget(QLabel("Release Time (s):"), 2, 0)
+        grid.addWidget(self.release_time, 2, 1)
+        grid.addWidget(QLabel("Rest Time (s):"), 3, 0)
+        grid.addWidget(self.rest_time, 3, 1)
+        grid.addWidget(QLabel("Total Trials:"), 4, 0)
+        grid.addWidget(self.trials, 4, 1)
+
+        layout.addLayout(grid)
+        layout.addWidget(self.prosthetic_control)
+
+        button_layout = QHBoxLayout()
+        self.refresh_btn = QPushButton("Refresh")
+        self.connect_btn = QPushButton("Connect")
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.start_btn = QPushButton("Start")
+        self.stop_btn = QPushButton("Stop")
+        
+        self.start_btn.clicked.connect(self.send_settings)
+
+        button_layout.addWidget(self.refresh_btn)
+        button_layout.addWidget(self.connect_btn)
+        button_layout.addWidget(self.disconnect_btn)
+        button_layout.addWidget(self.start_btn)
+        button_layout.addWidget(self.stop_btn)
+
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+        
+    def send_settings(self):
+        settings = {
+            'grasp': int(self.grasp_time.text()),
+            'holding': int(self.holding_time.text()),
+            'release': int(self.release_time.text()),
+            'rest': int(self.rest_time.text()),
+            'trials': int(self.trials.text())
+        }
+        self.start_test_signal.emit(settings)
+        self.accept()
+
+# ----- Test Page -----
+class TestPage(QWidget):
+    def __init__(self, back_callback, settings):
+        super().__init__()
+        self.settings = settings
+        self.current_trial = 0
+        self.sequence = [
+            ("image/grasp.png", self.settings['grasp']),
+            ("image/holding.png", self.settings['holding']),
+            ("image/release.png", self.settings['release']),
+            ("image/rest.png", self.settings['rest'])
+        ]
+        self.seq_index = 0
+
+        layout = QVBoxLayout()
+
+        self.back_btn = QPushButton("←")
+        self.back_btn.setFixedSize(100, 40)
+        self.back_btn.clicked.connect(back_callback)
+        layout.addWidget(self.back_btn, alignment=Qt.AlignLeft)
+
+        self.label = QLabel("Test Starting...")
+        self.label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label)
+
+        self.setLayout(layout)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.next_step)
+        self.next_step()
+
+    def next_step(self):
+        if self.current_trial >= self.settings['trials']:
+            self.label.setText("Test Completed!")
+            self.timer.stop()
+            return
+    
+        img_path, duration = self.sequence[self.seq_index]
+        if os.path.exists(img_path):
+            pixmap = QPixmap(img_path)
+            self.label.setPixmap(pixmap.scaled(800, 600, Qt.KeepAspectRatio))
+        else:
+            self.label.setText(f"Image not found: {img_path}")
+    
+        self.seq_index += 1
+    
+        if self.seq_index >= len(self.sequence):
+            self.seq_index = 0
+            self.current_trial += 1
+    
+        self.timer.start(duration * 1000)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -346,7 +466,7 @@ class MainWindow(QMainWindow):
         self.page_history = []
 
         self.prep_page = PreparationPage(self.show_main)
-        self.main_page = MainPage(self.show_named_page, self.go_back)
+        self.main_page = MainPage(self.show_named_page, self.open_test_setting, self.go_back)
 
         self.stack.addWidget(self.prep_page)
         self.stack.addWidget(self.main_page)
@@ -366,6 +486,17 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(page)
         self.page_history.append(self.stack.currentWidget())
         self.stack.setCurrentWidget(page)
+
+    def open_test_setting(self):
+        dialog = TestSettingDialog()
+        dialog.start_test_signal.connect(self.start_test)
+        dialog.exec_()
+
+    def start_test(self, settings):
+        self.page_history.append(self.stack.currentWidget())
+        self.test_page = TestPage(self.go_back, settings)
+        self.stack.addWidget(self.test_page)
+        self.stack.setCurrentWidget(self.test_page)
 
     def go_back(self):
         if self.page_history:
