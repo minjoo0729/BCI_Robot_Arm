@@ -243,6 +243,7 @@ class PreparationPage(QWidget):
             self.curves.append(p.plot())
 
 
+# ----- Main Page -----
 class MainPage(QWidget):
     def __init__(self, switch_page_callback, open_test_setting_callback, back_callback):
         super().__init__()
@@ -271,6 +272,8 @@ class MainPage(QWidget):
 
         layout.addStretch()
 
+
+# ----- Webcam Page -----
 class WebcamThread(QThread):
     frame_updated = pyqtSignal(QImage)
 
@@ -322,6 +325,8 @@ class WebcamPage(QWidget):
         self.thread.stop()
         self.back_callback()
 
+
+# ----- tmp simple page -----
 class SimplePage(QWidget):
     def __init__(self, title, back_callback):
         super().__init__()
@@ -338,6 +343,8 @@ class SimplePage(QWidget):
 
         self.setLayout(layout)
 
+
+# ----- Test Page -----
 class TestSettingDialog(QDialog):
     start_test_signal = pyqtSignal(dict)
     
@@ -401,7 +408,6 @@ class TestSettingDialog(QDialog):
         self.start_test_signal.emit(settings)
         self.accept()
 
-# ----- Test Page -----
 class TestPage(QWidget):
     def __init__(self, back_callback, settings):
         super().__init__()
@@ -454,6 +460,67 @@ class TestPage(QWidget):
         self.timer.start(duration * 1000)
 
 
+# ----- Video -----
+class VideoThread(QThread):
+    frame_updated = pyqtSignal(QImage)
+    finished = pyqtSignal()
+
+    def __init__(self, video_path):
+        super().__init__()
+        self.video_path = video_path
+        self.running = True
+
+    def run(self):
+        cap = cv2.VideoCapture(self.video_path)
+        while self.running:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            self.frame_updated.emit(img)
+            time.sleep(1/30)  # 프레임 속도 (대충 30fps 가정)
+        cap.release()
+        self.finished.emit()
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+class VideoPage(QWidget):
+    def __init__(self, back_callback):
+        super().__init__()
+        layout = QVBoxLayout()
+
+        self.back_btn = QPushButton("←")
+        self.back_btn.setFixedSize(100, 40)
+        self.back_btn.clicked.connect(self.handle_back)
+        layout.addWidget(self.back_btn, alignment=Qt.AlignLeft)
+
+        self.label = QLabel("Loading video...")
+        self.label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label)
+
+        self.setLayout(layout)
+
+        self.back_callback = back_callback
+
+        self.thread = VideoThread("video/test.mp4")
+        self.thread.frame_updated.connect(self.update_image)
+        self.thread.finished.connect(self.handle_back)
+        self.thread.start()
+
+    def update_image(self, img):
+        self.label.setPixmap(QPixmap.fromImage(img))
+
+    def handle_back(self):
+        if self.thread.isRunning():
+            self.thread.stop()
+        self.back_callback()
+
+
+# ----- Main -----
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -480,6 +547,8 @@ class MainWindow(QMainWindow):
     def show_named_page(self, name):
         if name == "웹캠 연결":
             page = WebcamPage(self.go_back)
+        elif name == "영상 보기":
+            page = VideoPage(self.go_back)
         else:
             page = SimplePage(name, self.go_back)
 
@@ -503,6 +572,7 @@ class MainWindow(QMainWindow):
             prev_page = self.page_history.pop()
             self.stack.setCurrentWidget(prev_page)
 
+# ----- Main Function -----
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
