@@ -1,9 +1,11 @@
 import sys, os, datetime, time, logging
+import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout,
     QLabel, QStackedWidget, QDesktopWidget, QFileDialog, QMessageBox, QHBoxLayout, QSpacerItem, QSizePolicy, QGroupBox, QGridLayout, QCheckBox, QComboBox, QLineEdit
 )
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap
 from brainflow.board_shim import BoardShim, BrainFlowInputParams
 from serial.tools import list_ports
 import numpy as np
@@ -252,12 +254,69 @@ class MainPage(QWidget):
         layout.addWidget(self.back_btn, alignment=Qt.AlignLeft)
 
         layout.addStretch()
-        for name in ["연습", "오프라인 수집", "온라인 수집", "영상 보기"]:
+
+        # 버튼 생성
+        self.buttons = []
+        names = ["연습", "웹캠 연결", "오프라인 수집", "온라인 수집", "영상 보기"]
+        for name in names:
             btn = QPushButton(name)
             btn.setFixedSize(150, 40)
             btn.clicked.connect(lambda _, n=name: switch_page_callback(n))
             layout.addWidget(btn, alignment=Qt.AlignCenter)
+            self.buttons.append(btn)
+
         layout.addStretch()
+
+class WebcamThread(QThread):
+    frame_updated = pyqtSignal(QImage)
+
+    def __init__(self):
+        super().__init__()
+        self.running = True
+
+    def run(self):
+        cap = cv2.VideoCapture(0)
+        while self.running:
+            ret, frame = cap.read()
+            if ret:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb.shape
+                img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+                self.frame_updated.emit(img)
+        cap.release()
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+class WebcamPage(QWidget):
+    def __init__(self, back_callback):
+        super().__init__()
+        layout = QVBoxLayout()
+
+        self.back_btn = QPushButton("←")
+        self.back_btn.setFixedSize(100, 40)
+        self.back_btn.clicked.connect(self.handle_back)
+        layout.addWidget(self.back_btn, alignment=Qt.AlignLeft)
+
+        self.label = QLabel("웹캠을 켜는 중...")
+        self.label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label)
+
+        self.setLayout(layout)
+
+        self.back_callback = back_callback
+
+        self.thread = WebcamThread()
+        self.thread.frame_updated.connect(self.update_image)
+        self.thread.start()
+
+    def update_image(self, img):
+        self.label.setPixmap(QPixmap.fromImage(img))
+
+    def handle_back(self):
+        self.thread.stop()
+        self.back_callback()
 
 class SimplePage(QWidget):
     def __init__(self, title, back_callback):
@@ -272,6 +331,7 @@ class SimplePage(QWidget):
         label = QLabel(f"여기는 {title} 페이지 입니다.")
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
+
         self.setLayout(layout)
 
 class MainWindow(QMainWindow):
@@ -298,7 +358,11 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.main_page)
 
     def show_named_page(self, name):
-        page = SimplePage(name, self.go_back)
+        if name == "웹캠 연결":
+            page = WebcamPage(self.go_back)
+        else:
+            page = SimplePage(name, self.go_back)
+
         self.stack.addWidget(page)
         self.page_history.append(self.stack.currentWidget())
         self.stack.setCurrentWidget(page)
