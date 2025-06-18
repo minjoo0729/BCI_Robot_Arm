@@ -1,9 +1,16 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 28 21:19:57 2025
+
+@author: minjoo
+"""
+
 import sys, os, datetime, time, logging
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout,
     QLabel, QStackedWidget, QHBoxLayout, QDialog, QGridLayout,
-    QLineEdit, QCheckBox, QGroupBox, QComboBox
+    QLineEdit, QCheckBox, QGroupBox, QComboBox, QMessageBox
 )
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -11,6 +18,13 @@ from brainflow.board_shim import BoardShim, BrainFlowInputParams
 from serial.tools import list_ports
 import numpy as np
 import pyqtgraph as pq
+
+# variable setting
+IMG_PATH = "image/"
+IMG_GRASP = "grasp.png"
+IMG_HOLDING = "holding.png"
+IMG_RELEASE = "release.png"
+IMG_REST = "rest.png"
 
 class PreparationPage(QWidget):
     def __init__(self, switch_to_main_callback):
@@ -79,6 +93,9 @@ class PreparationPage(QWidget):
         self.stop_PB = QPushButton("Stop stream")
         self.stop_PB.setFont(self._font())
         device_layout.addWidget(self.stop_PB, 6, 1)
+
+        self.start_PB.clicked.connect(self.start_stream)
+        self.stop_PB.clicked.connect(self.stop_stream)
 
         # Measurement group
         self.measurement_group = QGroupBox("Measurement")
@@ -208,25 +225,31 @@ class PreparationPage(QWidget):
         self.Port = text
 
     def RefreshSerialPort(self):
-        if self.Board:
-            self.Board.release_session()
-        ports = [p.device for p in list_ports.comports()]
+        # 보드 세션이 열려 있으면 해제하지 말고 그대로 둠
+        serial_objs = list_ports.comports()
+        ports = [p.device for p in serial_objs]
         self.port_COMB.clear()
         for port in ports:
             self.port_COMB.addItem(port)
 
     def btnConnect(self):
-        BoardShim.enable_dev_board_logger()
-        logging.basicConfig(level=logging.DEBUG)
-
-        params = BrainFlowInputParams()
-        params.serial_port = self.Port
-
-        self.Board = BoardShim(self.board_type, params)
-        self.Board.prepare_session()
-
+        if not self.Port:
+            QMessageBox.warning(self, "Warning", "COM 포트를 먼저 선택하세요.")
+            return
+        try:
+            BoardShim.enable_dev_board_logger()
+            params = BrainFlowInputParams()
+            params.serial_port = self.Port
+            self.Board = BoardShim(self.board_type, params)
+            self.Board.prepare_session()
+        except Exception as e:
+            QMessageBox.critical(self, "Connection Error", str(e))
+            return
+    
         self.exg_channels = BoardShim.get_exg_channels(self.board_type)
         self.sampling_rate = BoardShim.get_sampling_rate(self.board_type)
+        QMessageBox.information(self, "Success", "Board connected and session prepared!")
+
 
     def InitGraph(self):
         self.plots = []
@@ -241,6 +264,54 @@ class PreparationPage(QWidget):
             self.graph_layout.addWidget(p)
             self.plots.append(p)
             self.curves.append(p.plot())
+
+    # ① 스트림 시작
+    def start_stream(self):
+        if not self.Board:                       # 보드가 없는 경우
+            QMessageBox.warning(self, "Warning", "먼저 Connect 를 눌러 보드 세션을 열어주세요.")
+            return
+        # 기존 타이머가 살아 있으면 중지
+        if hasattr(self, "graph_timer") and self.graph_timer.isActive():
+            self.graph_timer.stop()
+    
+        try:
+            ring_size = int(self.buffer_LE.text()) if self.buffer_LE.text() else 450000
+            self.Board.start_stream(ring_size)
+        except Exception as e:
+            QMessageBox.critical(self, "Stream Error", str(e))
+            return
+    
+        # 50 ms 간격으로 그래프 업데이트
+        self.graph_timer = QTimer(self)
+        self.graph_timer.timeout.connect(self.update_graph)
+        self.graph_timer.start(50)
+    
+    # ② 스트림 정지
+    def stop_stream(self):
+        if not self.Board:
+            return
+        try:
+            self.Board.stop_stream()
+        except Exception:
+            pass
+        if hasattr(self, "graph_timer"):
+            self.graph_timer.stop()
+    
+    # ③ 그래프 갱신
+    def update_graph(self):
+        """
+        sampling_rate 의 1/5 구간(0.2 s)만 가져와 실시간 플롯을 갱신
+        """
+        try:
+            window_points = max(1, self.sampling_rate // 5)
+            data = self.Board.get_current_board_data(window_points)
+            for idx, ch in enumerate(self.exg_channels):
+                # data shape: (num_channels, N)
+                if data.shape[1] >= window_points:
+                    self.curves[idx].setData(data[ch])
+        except Exception:
+            pass
+
 
 
 # ----- Main Page -----
@@ -271,6 +342,17 @@ class MainPage(QWidget):
             self.buttons.append(btn)
 
         layout.addStretch()
+    
+    def closeEvent(self, event):
+        if hasattr(self.prep_page, "graph_timer") and self.prep_page.graph_timer.isActive():
+            self.prep_page.graph_timer.stop()
+        if self.prep_page.Board is not None and self.prep_page.Board.is_prepared():
+            try:
+                self.prep_page.stop_stream()
+            except Exception:
+                pass
+            self.prep_page.Board.release_session()
+        super().closeEvent(event)
 
 
 # ----- Webcam Page -----
